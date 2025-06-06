@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Configuration;
 using System.Diagnostics;
 using System.IO;
 using System.ServiceProcess;
@@ -36,51 +37,43 @@ namespace filewatch
         protected override void OnStart(string[] args)
         {
             _eventlog.WriteEntry("FileWatcher: Starting service", EventLogEntryType.Information);
-            _eventlog.WriteEntry("FileWatcher: Configuring...", EventLogEntryType.Information);
+            _eventlog.WriteEntry("FileWatcher: Reading configuration...", EventLogEntryType.Information);
 
-            if (args.Length > 0)
+            filename = ConfigurationManager.AppSettings["WatchFilePath"];
+
+            if (string.IsNullOrEmpty(filename))
             {
-                filename = args[0];
-                _eventlog.WriteEntry($"FileWatcher: Watching file: {filename}", EventLogEntryType.Information);
-            }
-            else
-            {
-                _eventlog.WriteEntry("FileWatcher: No file path provided in args, stopping service.", EventLogEntryType.Error);
+                _eventlog.WriteEntry("FileWatcher: No file path configured in App.config, stopping service.", EventLogEntryType.Error);
                 Stop();
                 return;
             }
 
-            try
+            if (!File.Exists(filename))
             {
-                if (!File.Exists(filename))
-                {
-                    _eventlog.WriteEntry($"FileWatcher: File does not exist: {filename}", EventLogEntryType.Error);
-                    Stop();
-                    return;
-                }
-
-                // Initialize the FileSystemWatcher
-                _watcher = new FileSystemWatcher
-                {
-                    Path = Path.GetDirectoryName(filename),
-                    Filter = Path.GetFileName(filename),
-                    NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.Size | NotifyFilters.FileName,
-                    EnableRaisingEvents = true
-                };
-
-                _watcher.Changed += OnChanged;
-                _watcher.Renamed += OnRenamed;
-                _watcher.Deleted += OnDeleted;
-                _watcher.Error += OnError;
-
-                _eventlog.WriteEntry("FileWatcher: FileSystemWatcher initialized and watching", EventLogEntryType.Information);
-            }
-            catch (Exception e)
-            {
-                _eventlog.WriteEntry($"FileWatcher: Error setting up watcher: {e.Message}\n{e.StackTrace}", EventLogEntryType.Error);
+                _eventlog.WriteEntry($"FileWatcher: File does not exist: {filename}, stopping service.", EventLogEntryType.Error);
                 Stop();
                 return;
             }
+
+            _eventlog.WriteEntry($"FileWatcher: Watching file: {filename}", EventLogEntryType.Information);
+
+            // Setup FileSystemWatcher to monitor the directory of the file
+            string directory = Path.GetDirectoryName(filename);
+            string file = Path.GetFileName(filename);
+
+            _watcher = new FileSystemWatcher(directory, file)
+            {
+                NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.FileName | NotifyFilters.Size
+            };
+
+            _watcher.Changed += OnChanged;
+            _watcher.Renamed += OnRenamed;
+            _watcher.Deleted += OnDeleted;
+            _watcher.Error += OnError;
+
+            _watcher.EnableRaisingEvents = true;
+
+            _eventlog.WriteEntry("FileWatcher: FileSystemWatcher started", EventLogEntryType.Information);
         }
 
         protected override void OnStop()
@@ -101,8 +94,7 @@ namespace filewatch
         {
             try
             {
-                // Sometimes the file may be locked immediately after change event,
-                // so we can retry a few times.
+                // Retry logic in case file is locked
                 int retries = 3;
                 while (retries > 0)
                 {
@@ -142,4 +134,3 @@ namespace filewatch
         }
     }
 }
- 
