@@ -132,5 +132,6 @@ namespace filewatch
         {
             _eventlog.WriteEntry($"FileWatcher: FileSystemWatcher error: {e.GetException().Message}", EventLogEntryType.Error);
         }
+
     }
 }
