@@ -1,28 +1,18 @@
 ﻿using System;
-using System.Collections.Generic;
-using System.ComponentModel;
-using System.Data;
 using System.Diagnostics;
-using System.Linq;
-using System.Runtime.Remoting.Messaging;
-using System.ServiceProcess;
-using System.Text;
-using System.Threading;
-using System.Threading.Tasks;
 using System.IO;
+using System.ServiceProcess;
+using System.Threading;
 
 namespace filewatch
 {
     public partial class Service : ServiceBase
     {
-        private string data;
         private string filename;
         private EventLog _eventlog;
-        private volatile bool _shouldStop;
-        private Thread _workerThread;
+        private FileSystemWatcher _watcher;
         private const string EventSourceName = "FileWatcher";
         private const string EventLogName = "Application";
-
 
         public Service()
         {
@@ -33,7 +23,7 @@ namespace filewatch
 
             _eventlog = new EventLog();
 
-            if (!EventLog.SourceExists(EventSourceName)) 
+            if (!EventLog.SourceExists(EventSourceName))
             {
                 EventLog.CreateEventSource(EventSourceName, EventLogName);
             }
@@ -43,78 +33,113 @@ namespace filewatch
             _eventlog.WriteEntry("FileWatcher: Constructor called", EventLogEntryType.Information);
         }
 
-
         protected override void OnStart(string[] args)
         {
             _eventlog.WriteEntry("FileWatcher: Starting service", EventLogEntryType.Information);
             _eventlog.WriteEntry("FileWatcher: Configuring...", EventLogEntryType.Information);
+
             if (args.Length > 0)
             {
-                _eventlog.WriteEntry($"FileWatcher: Setting {args[0]} as path", EventLogEntryType.Information);
                 filename = args[0];
+                _eventlog.WriteEntry($"FileWatcher: Watching file: {filename}", EventLogEntryType.Information);
             }
             else
             {
-                _eventlog.WriteEntry("FileWatcher: Invalid args, cannot watch file.", EventLogEntryType.Error);
+                _eventlog.WriteEntry("FileWatcher: No file path provided in args, stopping service.", EventLogEntryType.Error);
                 Stop();
                 return;
-
             }
-            _eventlog.WriteEntry("FileWatcher: Testing file...", EventLogEntryType.Information);
+
             try
             {
-                data = File.ReadAllText(filename);
+                if (!File.Exists(filename))
+                {
+                    _eventlog.WriteEntry($"FileWatcher: File does not exist: {filename}", EventLogEntryType.Error);
+                    Stop();
+                    return;
+                }
+
+                // Initialize the FileSystemWatcher
+                _watcher = new FileSystemWatcher
+                {
+                    Path = Path.GetDirectoryName(filename),
+                    Filter = Path.GetFileName(filename),
+                    NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.Size | NotifyFilters.FileName,
+                    EnableRaisingEvents = true
+                };
+
+                _watcher.Changed += OnChanged;
+                _watcher.Renamed += OnRenamed;
+                _watcher.Deleted += OnDeleted;
+                _watcher.Error += OnError;
+
+                _eventlog.WriteEntry("FileWatcher: FileSystemWatcher initialized and watching", EventLogEntryType.Information);
             }
             catch (Exception e)
             {
-                _eventlog.WriteEntry($"FileWatcher: Fatal Error {e.Message}\n{e.StackTrace}", EventLogEntryType.Error);
+                _eventlog.WriteEntry($"FileWatcher: Error setting up watcher: {e.Message}\n{e.StackTrace}", EventLogEntryType.Error);
                 Stop();
                 return;
             }
-
-            _eventlog.WriteEntry("FileWatcher: Configuring Done", EventLogEntryType.Information);
-            _shouldStop = false;
-            _workerThread = new Thread(DoWork) { IsBackground = true };
-            _workerThread.Start();
-            _eventlog.WriteEntry("FileWatcher: Started Background Service", EventLogEntryType.Information);
         }
 
         protected override void OnStop()
         {
-            _eventlog.WriteEntry("FileWatcher: Stopping Service", EventLogEntryType.Information);
-            _shouldStop = true;
+            _eventlog.WriteEntry("FileWatcher: Stopping service", EventLogEntryType.Information);
 
-            if (_workerThread != null && _workerThread.IsAlive) 
+            if (_watcher != null)
             {
-                _workerThread.Join();
+                _watcher.EnableRaisingEvents = false;
+                _watcher.Dispose();
+                _watcher = null;
             }
-            _eventlog.WriteEntry("FileWatcher: Service Stopped Cleanly", EventLogEntryType.Information);
+
+            _eventlog.WriteEntry("FileWatcher: Service stopped cleanly", EventLogEntryType.Information);
         }
 
-        private void DoWork() 
+        private void OnChanged(object sender, FileSystemEventArgs e)
         {
-            _eventlog.WriteEntry("FileWatcher: Background worker running", EventLogEntryType.Information);
-
-            while (!_shouldStop) 
+            try
             {
-                try
+                // Sometimes the file may be locked immediately after change event,
+                // so we can retry a few times.
+                int retries = 3;
+                while (retries > 0)
                 {
-                    string newdata = File.ReadAllText(filename);
-                    if (newdata != data)
+                    try
                     {
-                        _eventlog.WriteEntry($"FileWatcher: Change Detected.\nOriginal: {data}\nNew: {newdata}");
-                        data = newdata;
-                        newdata = "";
+                        string newData = File.ReadAllText(filename);
+                        _eventlog.WriteEntry($"FileWatcher: File changed at {DateTime.Now}. New content length: {newData.Length} chars.", EventLogEntryType.Information);
+                        break;
                     }
-                    Thread.Sleep(30000);
-                }
-                catch (Exception e)
-                {
-                    _eventlog.WriteEntry($"FileWatcher: Error {e.Message}\n{e.StackTrace}", EventLogEntryType.Error);
-                    Stop();
-                    return;
+                    catch (IOException)
+                    {
+                        retries--;
+                        Thread.Sleep(100);
+                    }
                 }
             }
+            catch (Exception ex)
+            {
+                _eventlog.WriteEntry($"FileWatcher: Error reading changed file: {ex.Message}", EventLogEntryType.Error);
+            }
+        }
+
+        private void OnRenamed(object sender, RenamedEventArgs e)
+        {
+            _eventlog.WriteEntry($"FileWatcher: File renamed from {e.OldFullPath} to {e.FullPath}", EventLogEntryType.Warning);
+        }
+
+        private void OnDeleted(object sender, FileSystemEventArgs e)
+        {
+            _eventlog.WriteEntry("FileWatcher: File deleted, stopping service.", EventLogEntryType.Error);
+            Stop();
+        }
+
+        private void OnError(object sender, ErrorEventArgs e)
+        {
+            _eventlog.WriteEntry($"FileWatcher: FileSystemWatcher error: {e.GetException().Message}", EventLogEntryType.Error);
         }
     }
 }
+ 
